@@ -1,0 +1,1376 @@
+diff --git a/ServerScriptService/ForgeServer.server.lua b/ServerScriptService/ForgeServer.server.lua
+index 1f216b6..62dbc98 100644
+--- a/ServerScriptService/ForgeServer.server.lua
++++ b/ServerScriptService/ForgeServer.server.lua
+@@ -1,20 +1,18 @@
+ --[[
+-	ForgeServer (Script — type "Server")
++	ForgeServer (Script)
+ 	Emplacement : ServerScriptService > ForgeServer
+ 
+-	Rôle : fait le lien entre l'enclume, le client et ForgeLogic.
+-	       - le joueur active l'enclume  -> on demande au client d'ouvrir l'interface
+-	       - le client clique "Fusionner" -> on attend 1,5 s (suspens) puis on fusionne
+-
+-	Le serveur reste le seul juge : il revérifie la distance,
+-	le nombre de couteaux et le tier avant toute fusion.
++	Étape 2 : le serveur ouvre le mini-jeu de frappe, reçoit son bonus,
++	puis reste le seul responsable du calcul de fusion.
+ --]]
+ 
++local Players = game:GetService("Players")
+ local ServerStorage = game:GetService("ServerStorage")
+ local ReplicatedStorage = game:GetService("ReplicatedStorage")
+ 
+ local ForgeLogic = require(ServerStorage.ForgeKnives.ForgeLogic)
+ local InventoryService = require(ServerStorage.ForgeKnives.InventoryService)
++local KnifeData = require(ServerStorage.ForgeKnives.KnifeData)
+ 
+ local forgeEvent = ReplicatedStorage:WaitForChild("ForgeEvent")
+ 
+@@ -22,93 +20,122 @@ local forgeMap = workspace:WaitForChild("ForgeMap")
+ local anvil = forgeMap:WaitForChild("Anvil")
+ local forgePrompt = anvil:WaitForChild("ForgePrompt")
+ 
+----------------------------------------------------------------------
+--- RÉGLAGES
+----------------------------------------------------------------------
+-
+-local SUSPENS = 1.5           -- secondes d'attente avant le tirage
+-local DISTANCE_MAX = 25       -- studs : au-delà, la fusion est refusée
++local SUSPENS = 1.5
++local DISTANCE_MAX = 25
++local DUREE_MAX_FRAPPE = 8
+ 
+--- Empêche un joueur de lancer deux fusions en même temps.
++-- Un joueur ne peut avoir qu'une frappe ou une fusion active à la fois.
+ local fusionEnCours = {}
++local frappeActive = {}
+ 
+----------------------------------------------------------------------
+--- OUVERTURE DE L'INTERFACE
+----------------------------------------------------------------------
+-
+-forgePrompt.Triggered:Connect(function(player)
+-	-- On envoie au client l'inventaire à jour + sa chauffe.
+-	forgeEvent:FireClient(player, "OpenForge", InventoryService.buildSnapshot(player))
+-end)
+-
+----------------------------------------------------------------------
+--- LE CLIENT DEMANDE UNE FUSION
+----------------------------------------------------------------------
+-
+--- Vérifie que le joueur est bien devant l'enclume.
+ local function estPresDeLEnclume(player)
+ 	local character = player.Character
+ 	local racine = character and character:FindFirstChild("HumanoidRootPart")
+-	if not racine then
+-		return false
+-	end
+-	return (racine.Position - anvil.Position).Magnitude <= DISTANCE_MAX
++
++	return racine ~= nil and (racine.Position - anvil.Position).Magnitude <= DISTANCE_MAX
+ end
+ 
+-forgeEvent.OnServerEvent:Connect(function(player, action, tierId)
+-	-- On ne traite qu'une seule action venant du client.
+-	if action ~= "RequestFusion" then
++local function envoyerErreur(player, texte)
++	forgeEvent:FireClient(player, "ForgeResult", {
++		statut = "invalid",
++		texte = texte,
++		couleur = Color3.fromRGB(255, 200, 100),
++	})
++end
++
++forgePrompt.Triggered:Connect(function(player)
++	forgeEvent:FireClient(player, "OpenForge", InventoryService.buildSnapshot(player))
++end)
++
++forgeEvent.OnServerEvent:Connect(function(player, action, tierId, bonusFrappe)
++	-- Première demande : le joueur a cliqué sur FUSIONNER.
++	if action == "StartStrike" then
++		if fusionEnCours[player] or frappeActive[player] then
++			return
++		end
++
++		if type(tierId) ~= "number" or not KnifeData.getTier(tierId) then
++			return
++		end
++
++		if not estPresDeLEnclume(player) then
++			envoyerErreur(player, "Tu es trop loin de l'enclume.")
++			return
++		end
++
++		if not KnifeData.getNextTierId(tierId) then
++			envoyerErreur(player, "Déjà au niveau cosmique !")
++			return
++		end
++
++		if InventoryService.getCount(player, tierId) < 2 then
++			envoyerErreur(player, "Il te faut 2 couteaux identiques.")
++			return
++		end
++
++		frappeActive[player] = tierId
++		forgeEvent:FireClient(player, "StartStrike", tierId)
++
++		-- Une frappe abandonnée ne bloque jamais définitivement le joueur.
++		task.delay(DUREE_MAX_FRAPPE, function()
++			if frappeActive[player] == tierId then
++				frappeActive[player] = nil
++				forgeEvent:FireClient(player, "StrikeCancelled", "Frappe annulée : trop de temps écoulé.")
++			end
++		end)
+ 		return
+ 	end
+ 
+-	-- Anti double-clic / anti-spam.
+-	if fusionEnCours[player] then
++	-- Seul PerfectStrikeClient envoie ce résultat après le clic du joueur.
++	if action ~= "StrikeResult" then
+ 		return
+ 	end
+ 
+-	-- Le client doit envoyer un numéro de tier valide.
+-	if type(tierId) ~= "number" then
++	if frappeActive[player] ~= tierId or fusionEnCours[player] then
+ 		return
+ 	end
+ 
+-	-- Le joueur doit être physiquement devant l'enclume.
+ 	if not estPresDeLEnclume(player) then
+-		forgeEvent:FireClient(player, "ForgeResult", {
+-			statut = "invalid",
+-			texte = "Tu es trop loin de l'enclume.",
+-			couleur = Color3.fromRGB(255, 200, 100),
+-		})
++		frappeActive[player] = nil
++		envoyerErreur(player, "Tu es trop loin de l'enclume.")
+ 		return
+ 	end
+ 
++	-- Le bonus est limité côté serveur, même si le client est modifié.
++	bonusFrappe = math.clamp(tonumber(bonusFrappe) or 0, 0, 0.15)
++	if bonusFrappe ~= 0 and bonusFrappe ~= 0.05 and bonusFrappe ~= 0.15 then
++		bonusFrappe = 0
++	end
++
++	frappeActive[player] = nil
+ 	fusionEnCours[player] = true
+ 
+-	-- SUSPENS : on fait patienter avant le verdict.
++	local base, chauffe, chanceFinale = ForgeLogic.getChance(player, tierId, bonusFrappe)
++	forgeEvent:FireClient(player, "StrikeFeedback", {
++		bonus = bonusFrappe,
++		base = base,
++		chauffe = chauffe,
++		chanceFinale = chanceFinale,
++	})
++
+ 	task.wait(SUSPENS)
+ 
+-	-- Le joueur a pu quitter le jeu pendant l'attente.
+ 	if not player.Parent then
+ 		fusionEnCours[player] = nil
+ 		return
+ 	end
+ 
+-	-- Le verdict, calculé par ForgeLogic.
+-	local resultat = ForgeLogic.attemptFusion(player, tierId)
+-
+-	-- On renvoie le résultat au client : il débloque son bouton
+-	-- et affiche le message dans le panneau.
++	local resultat = ForgeLogic.attemptFusion(player, tierId, bonusFrappe)
+ 	forgeEvent:FireClient(player, "ForgeResult", resultat)
+-	-- Et le même message en bandeau plein écran.
+ 	forgeEvent:FireClient(player, "Notification", resultat.texte, resultat.couleur)
+ 
+ 	print("[Forge] " .. player.Name .. " -> " .. resultat.statut .. " : " .. resultat.texte)
+-
+ 	fusionEnCours[player] = nil
+ end)
+ 
+--- Nettoyage si un joueur part pendant une fusion.
+-game:GetService("Players").PlayerRemoving:Connect(function(player)
++Players.PlayerRemoving:Connect(function(player)
+ 	fusionEnCours[player] = nil
++	frappeActive[player] = nil
+ end)
+ 
+-print("[Forge] Système de fusion prêt.")
++print("[Forge] Système de fusion et frappe parfaite prêt.")
+diff --git a/ServerScriptService/Step2Test.server.lua b/ServerScriptService/Step2Test.server.lua
+index 0ab8b07..e6c9462 100644
+--- a/ServerScriptService/Step2Test.server.lua
++++ b/ServerScriptService/Step2Test.server.lua
+@@ -3,7 +3,7 @@
+ 	Emplacement : ServerScriptService > Step2Test
+ 
+ 	Rôle : script JETABLE de l'étape 2.
+-	       1) Affiche la table des 6 tiers.
++	       1) Affiche la table des 8 tiers.
+ 	       2) Simule 10 000 ouvertures de caisses pour vérifier que
+ 	          getRandomTier() respecte bien les poids annoncés.
+ 
+@@ -16,7 +16,7 @@ local KnifeData = require(ServerStorage.ForgeKnives.KnifeData)
+ print("===== ÉTAPE 2 : TABLE DES TIERS =====")
+ for tierId, tier in ipairs(KnifeData.Tiers) do
+ 	print(string.format(
+-		"%d. %-11s | fusion %3d%% | drop %5.1f%% | poids %d",
++		"%d. %-11s | fusion %3d%% | drop %5.1f%% | poids %g",
+ 		tierId,
+ 		tier.Name,
+ 		math.floor(tier.FusionChance * 100),
+@@ -51,6 +51,7 @@ end
+ 
+ print("===== TEST DU TIER SUPÉRIEUR =====")
+ print("Au-dessus de Rare (3)      :", KnifeData.getTierName(KnifeData.getNextTierId(3) or 0))
+-print("Au-dessus de Mythique (6)  :", KnifeData.getNextTierId(6) == nil and "AUCUN (maximum atteint)" or "ERREUR")
++print("Au-dessus de Mythique (6)  :", KnifeData.getTierName(KnifeData.getNextTierId(6) or 0))
++print("Au-dessus de Cosmique (8)  :", KnifeData.getNextTierId(8) == nil and "AUCUN (maximum atteint)" or "ERREUR")
+ 
+ print("===== FIN DU TEST ÉTAPE 2 =====")
+diff --git a/ServerStorage/ForgeKnives/ForgeLogic.lua b/ServerStorage/ForgeKnives/ForgeLogic.lua
+index d153151..2c67c99 100644
+--- a/ServerStorage/ForgeKnives/ForgeLogic.lua
++++ b/ServerStorage/ForgeKnives/ForgeLogic.lua
+@@ -1,94 +1,38 @@
+---[[
+-	ForgeLogic (ModuleScript)
+-	Emplacement : ServerStorage > ForgeKnives > ForgeLogic
+-
+-	Rôle : TOUTE la logique de fusion. C'est le cerveau du jeu.
+-	       Ce module ne connaît rien aux interfaces : il reçoit un joueur
+-	       et un tier, il applique les règles, il renvoie un résultat.
+-
+-	RÈGLE ANTI-FRUSTRATION :
+-	  - Succès : les 2 couteaux partent, 1 couteau du tier supérieur arrive,
+-	             la chauffe est remise à zéro.
+-	  - Échec  : UN SEUL couteau est perdu, l'autre reste,
+-	             et la chauffe monte de +2 % (plafond +40 %).
+---]]
+-
++--[[ ForgeLogic : logique serveur des fusions. --]]
+ local ServerStorage = game:GetService("ServerStorage")
+-
+ local KnifeData = require(ServerStorage.ForgeKnives.KnifeData)
+ local InventoryService = require(ServerStorage.ForgeKnives.InventoryService)
+ 
+ local ForgeLogic = {}
+-
+--- Générateur aléatoire dédié à la forge.
+ local rng = Random.new()
+ 
+----------------------------------------------------------------------
+--- CALCUL DE LA CHANCE
+----------------------------------------------------------------------
+-
+---[[
+-	getChance(player, tierId)
+-	Renvoie 3 valeurs, toutes en décimal (0.81 = 81 %) :
+-	  chanceBase   -> la chance du tier seule
+-	  chauffe      -> le bonus de chauffe du joueur
+-	  chanceTotale -> la somme, plafonnée à 100 %
+-
+-	Utilisé DEUX fois : pour l'affichage dans l'interface,
+-	et pour le tirage réel. Ainsi le joueur voit toujours le vrai chiffre.
+---]]
+-function ForgeLogic.getChance(player, tierId)
+-	local tier = KnifeData.getTier(tierId)
+-	if not tier then
+-		return 0, 0, 0
+-	end
+-
+-	local chanceBase = tier.FusionChance
+-	local chauffe = InventoryService.getHeat(player)
+-	local chanceTotale = math.min(chanceBase + chauffe, 1)
+-
+-	return chanceBase, chauffe, chanceTotale
+-end
++-- Réglages de l'étape 3. Remettre GOLDEN_CHANCE à 0.01 après les tests.
++local CRITICAL_CHANCE = 0.05
++local GOLDEN_CHANCE = 0.01
+ 
+----------------------------------------------------------------------
+--- LA FUSION
+----------------------------------------------------------------------
++-- Compteurs de débogage : remis à zéro lorsque le serveur redémarre.
++local debugStats = { attempts = 0, criticals = 0, goldens = 0 }
+ 
+---[[
+-	attemptFusion(player, tierId)
+-	Tente de fusionner 2 couteaux du tier donné.
++function ForgeLogic.getChance(player, tierId, bonusFrappe)
++	local tier = KnifeData.getTier(tierId)
++	if not tier then return 0, 0, 0 end
+ 
+-	Renvoie une table résultat :
+-	  { statut = "success" | "fail" | "max" | "notenough" | "invalid",
+-	    texte  = message à afficher,
+-	    couleur = Color3 du message }
++	local base = tier.FusionChance
++	local heat = InventoryService.getHeat(player)
++	local bonus = math.clamp(tonumber(bonusFrappe) or 0, 0, 0.15)
++	return base, heat, math.min(base + heat + bonus, 0.95)
++end
+ 
+-	IMPORTANT : cette fonction fait CONFIANCE à personne.
+-	Elle revérifie tout, même si le client a déjà vérifié de son côté.
+---]]
+-function ForgeLogic.attemptFusion(player, tierId)
++function ForgeLogic.attemptFusion(player, tierId, bonusFrappe)
+ 	local tier = KnifeData.getTier(tierId)
+-
+-	-- Cas 0 : le client a envoyé n'importe quoi.
+ 	if not tier then
+-		return {
+-			statut = "invalid",
+-			texte = "Couteau inconnu.",
+-			couleur = Color3.fromRGB(255, 255, 255),
+-		}
++		return { statut = "invalid", texte = "Couteau inconnu.", couleur = Color3.new(1, 1, 1) }
+ 	end
+ 
+-	-- Cas 1 : déjà au tier maximum (Mythique). On ne consomme RIEN.
+-	local tierSuperieurId = KnifeData.getNextTierId(tierId)
+-	if not tierSuperieurId then
+-		return {
+-			statut = "max",
+-			texte = "Déjà au maximum ! Aucun couteau au-dessus du " .. tier.Name .. ".",
+-			couleur = tier.Color,
+-		}
++	if not KnifeData.getNextTierId(tierId) then
++		return { statut = "max", texte = "Déjà au niveau cosmique !", couleur = tier.Color }
+ 	end
+ 
+-	-- Cas 2 : pas assez de couteaux. On ne consomme RIEN.
+ 	if InventoryService.getCount(player, tierId) < 2 then
+ 		return {
+ 			statut = "notenough",
+@@ -97,41 +41,70 @@ function ForgeLogic.attemptFusion(player, tierId)
+ 		}
+ 	end
+ 
+-	-- On calcule la chance AVANT de toucher à quoi que ce soit.
+-	local _, _, chanceTotale = ForgeLogic.getChance(player, tierId)
++	debugStats.attempts += 1
+ 
+-	-- Le premier couteau est consommé dans TOUS les cas.
+-	InventoryService.removeKnife(player, tierId, 1)
++	-- La fusion dorée est tirée AVANT le lancer de réussite normal.
++	local golden = rng:NextNumber() < GOLDEN_CHANCE
++	local _, _, chance = ForgeLogic.getChance(player, tierId, bonusFrappe)
++	local success = golden or rng:NextNumber() <= chance
+ 
+-	-- Le tirage : un nombre entre 0 et 1.
+-	local tirage = rng:NextNumber()
+-	local reussi = (tirage <= chanceTotale)
++	-- Un couteau part toujours après un essai valide.
++	InventoryService.removeKnife(player, tierId, 1)
+ 
+-	if reussi then
+-		-- SUCCÈS : le second couteau part aussi, le tier supérieur arrive.
+-		InventoryService.removeKnife(player, tierId, 1)
+-		InventoryService.addKnife(player, tierSuperieurId, 1)
+-		InventoryService.resetHeat(player) -- la forge redescend en température
++	if not success then
++		local heat = InventoryService.addHeat(player)
++		return {
++			statut = "fail",
++			texte = string.format("La fusion a échoué... la forge chauffe (+2 %%) ! Bonus total : +%d %%", math.floor(heat * 100 + 0.5)),
++			couleur = Color3.fromRGB(255, 120, 90),
++			type = "fail",
++		}
++	end
+ 
+-		local tierSuperieur = KnifeData.getTier(tierSuperieurId)
++	-- Succès : le second couteau est retiré, la chauffe redescend.
++	InventoryService.removeKnife(player, tierId, 1)
++	InventoryService.resetHeat(player)
++
++	-- Une dorée est toujours critique. Une réussite normale a 5 % de critique.
++	local critical = golden or rng:NextNumber() < CRITICAL_CHANCE
++	local tiersGagnes = critical and 2 or 1
++	local resultTierId = math.min(tierId + tiersGagnes, KnifeData.TierCount)
++	InventoryService.addKnife(player, resultTierId, 1)
++
++	local resultTier = KnifeData.getTier(resultTierId)
++	if golden then
++		debugStats.goldens += 1
++		InventoryService.addGoldenFusion(player)
++		print(string.format("[Forge DEBUG] DORÉE %d/%d tentatives | %s", debugStats.goldens, debugStats.attempts, player.Name))
+ 		return {
+ 			statut = "success",
+-			texte = "Fusion réussie ! Tu obtiens un " .. tierSuperieur.Name .. " !",
+-			couleur = tierSuperieur.Color,
++			type = "golden",
++			texte = "✨ FUSION DORÉE ! Tu obtiens un " .. resultTier.Name .. " !",
++			couleur = Color3.fromRGB(255, 215, 70),
++			resultTierId = resultTierId,
+ 		}
+-	else
+-		-- ÉCHEC : le second couteau est SAUVÉ, mais la forge chauffe.
+-		local nouvelleChauffe = InventoryService.addHeat(player)
++	end
+ 
++	if critical then
++		debugStats.criticals += 1
++		InventoryService.addCriticalFusion(player)
++		print(string.format("[Forge DEBUG] CRITIQUE %d/%d tentatives | %s", debugStats.criticals, debugStats.attempts, player.Name))
+ 		return {
+-			statut = "fail",
+-			texte = string.format(
+-				"La fusion a échoué... mais la forge chauffe (+2 %%) ! Bonus total : +%d %%",
+-				math.floor(nouvelleChauffe * 100 + 0.5)
+-			),
+-			couleur = Color3.fromRGB(255, 120, 90),
++			statut = "success",
++			type = "critical",
++			texte = "⚡ FUSION CRITIQUE ! Tu obtiens un " .. resultTier.Name .. " !",
++			couleur = Color3.fromRGB(255, 215, 70),
++			resultTierId = resultTierId,
+ 		}
+ 	end
++
++	return {
++		statut = "success",
++		type = "normal",
++		texte = "Fusion réussie ! Tu obtiens un " .. resultTier.Name .. " !",
++		couleur = resultTier.Color,
++		resultTierId = resultTierId,
++	}
+ end
+ 
+ return ForgeLogic
+diff --git a/ServerStorage/ForgeKnives/InventoryService.lua b/ServerStorage/ForgeKnives/InventoryService.lua
+index d300278..a02bd6b 100644
+--- a/ServerStorage/ForgeKnives/InventoryService.lua
++++ b/ServerStorage/ForgeKnives/InventoryService.lua
+@@ -43,6 +43,8 @@ function InventoryService.setup(player)
+ 	donnees[player] = {
+ 		knives = knives,
+ 		heat = 0,
++		criticalFusions = 0,
++		goldenFusions = 0,
+ 	}
+ end
+ 
+@@ -70,6 +72,35 @@ function InventoryService.getHeat(player)
+ 	return data and data.heat or 0
+ end
+ 
++-- Statistiques personnelles de l'étape 3.
++function InventoryService.addCriticalFusion(player)
++	local data = donnees[player]
++	if data then
++		data.criticalFusions += 1
++		InventoryService.push(player)
++	end
++end
++
++function InventoryService.addGoldenFusion(player)
++	local data = donnees[player]
++	if data then
++		data.goldenFusions += 1
++		InventoryService.push(player)
++	end
++end
++
++function InventoryService.getStats(player)
++	local data = donnees[player]
++	if not data then
++		return { criticalFusions = 0, goldenFusions = 0 }
++	end
++
++	return {
++		criticalFusions = data.criticalFusions,
++		goldenFusions = data.goldenFusions,
++	}
++end
++
+ ---------------------------------------------------------------------
+ -- ÉCRITURE
+ ---------------------------------------------------------------------
+@@ -145,6 +176,7 @@ end
+ function InventoryService.buildSnapshot(player)
+ 	local snapshot = {
+ 		heat = InventoryService.getHeat(player),
++		stats = InventoryService.getStats(player),
+ 		tiers = {},
+ 	}
+ 
+diff --git a/ServerStorage/ForgeKnives/KnifeData.lua b/ServerStorage/ForgeKnives/KnifeData.lua
+index cab1dda..4941f56 100644
+--- a/ServerStorage/ForgeKnives/KnifeData.lua
++++ b/ServerStorage/ForgeKnives/KnifeData.lua
+@@ -2,112 +2,94 @@
+ 	KnifeData (ModuleScript)
+ 	Emplacement : ServerStorage > ForgeKnives > KnifeData
+ 
+-	Rôle : source unique de vérité pour les 6 tiers de couteaux.
+-	       - Name         : nom affiché
+-	       - Color        : couleur du couteau / de l'interface
+-	       - FusionChance : chance de base de réussir une fusion DE ce tier (0 à 1)
+-	       - DropWeight   : poids de tirage dans les caisses (plus grand = plus fréquent)
+-
+-	IMPORTANT : l'ordre du tableau EST la hiérarchie.
+-	            Tiers[1] = le plus commun, Tiers[6] = le plus rare.
+-	            Partout dans le jeu, un couteau est identifié par son NUMÉRO de tier (1 à 6).
++	Rôle : source unique de vérité pour les 8 tiers de couteaux.
++	L'ordre du tableau EST la hiérarchie : T1 est le plus commun,
++	T8 est le dernier tier disponible.
+ --]]
+ 
+ local KnifeData = {}
+ 
+--- Somme des poids = 1000, ce qui rend les pourcentages faciles à lire :
+---   600 -> 60 %   |   250 -> 25 %   |   100 -> 10 %
+---    40 -> 4 %    |     9 -> 0,9 %  |     1 -> 0,1 %
++-- Les poids sont relatifs : la somme n'a pas besoin d'être égale à 100.
++-- Avec ces valeurs, T1 reste dominant et T7/T8 sont très rares.
+ KnifeData.Tiers = {
+ 	{
+ 		Name = "Commun",
+-		Color = Color3.fromRGB(160, 160, 160), -- gris
+-		FusionChance = 1.00,                   -- 100 % de réussite
+-		DropWeight = 600,
++		Color = Color3.new(0.5, 0.5, 0.5),
++		FusionChance = 1.00,
++		DropWeight = 40,
+ 	},
+ 	{
+ 		Name = "Inhabituel",
+-		Color = Color3.fromRGB(70, 200, 70),   -- vert
+-		FusionChance = 0.90,                   -- 90 %
+-		DropWeight = 250,
++		Color = Color3.new(0, 0.8, 0),
++		FusionChance = 0.90,
++		DropWeight = 25,
+ 	},
+ 	{
+ 		Name = "Rare",
+-		Color = Color3.fromRGB(60, 130, 240),  -- bleu
+-		FusionChance = 0.75,                   -- 75 %
+-		DropWeight = 100,
++		Color = Color3.new(0, 0.4, 1),
++		FusionChance = 0.75,
++		DropWeight = 15,
+ 	},
+ 	{
+ 		Name = "Épique",
+-		Color = Color3.fromRGB(160, 70, 220),  -- violet
+-		FusionChance = 0.60,                   -- 60 %
+-		DropWeight = 40,
++		Color = Color3.new(0.6, 0, 1),
++		FusionChance = 0.60,
++		DropWeight = 8,
+ 	},
+ 	{
+ 		Name = "Légendaire",
+-		Color = Color3.fromRGB(240, 190, 40),  -- or
+-		FusionChance = 0.45,                   -- 45 %
+-		DropWeight = 9,
++		Color = Color3.new(1, 0.85, 0),
++		FusionChance = 0.45,
++		DropWeight = 4,
+ 	},
+ 	{
+ 		Name = "Mythique",
+-		Color = Color3.fromRGB(220, 50, 50),   -- rouge
+-		FusionChance = 0.30,                   -- 30 % (mais aucun tier au-dessus)
++		Color = Color3.new(1, 0.2, 0.1),
++		FusionChance = 0.30,
++		DropWeight = 2,
++	},
++	{
++		Name = "Divin",
++		Color = Color3.new(0.5, 0.3, 0.9),
++		FusionChance = 0.18,
+ 		DropWeight = 1,
+ 	},
++	{
++		Name = "Cosmique",
++		Color = Color3.new(0.1, 0.1, 0.2),
++		FusionChance = 0.10,
++		DropWeight = 0.5,
++	},
+ }
+ 
+--- Nombre total de tiers (pratique pour les boucles et les cas limites).
+ KnifeData.TierCount = #KnifeData.Tiers
+ 
+--- Générateur aléatoire dédié : plus propre que math.random global.
+ local rng = Random.new()
+ 
+--- Somme des poids, calculée une seule fois au chargement du module.
++-- La somme est calculée à partir des 8 tiers au chargement du module.
+ local poidsTotal = 0
+ for _, tier in ipairs(KnifeData.Tiers) do
+ 	poidsTotal += tier.DropWeight
+ end
+ 
+---[[
+-	getTier(tierId)
+-	Renvoie la table de données d'un tier, ou nil si le numéro est invalide.
+-	Exemple : KnifeData.getTier(3).Name --> "Rare"
+---]]
+ function KnifeData.getTier(tierId)
+ 	return KnifeData.Tiers[tierId]
+ end
+ 
+---[[
+-	getTierName(tierId)
+-	Renvoie juste le nom du tier (ou "?" si invalide). Pratique pour les messages.
+---]]
+ function KnifeData.getTierName(tierId)
+ 	local tier = KnifeData.Tiers[tierId]
+ 	return tier and tier.Name or "?"
+ end
+ 
+---[[
+-	getNextTierId(tierId)
+-	Renvoie le numéro du tier juste au-dessus, ou nil si on est déjà au maximum.
+-	Servira à l'étape 6 pour le cas "Déjà au maximum !".
+---]]
++-- T1 -> T2, ... T7 -> T8. T8 ne possède pas de tier supérieur.
+ function KnifeData.getNextTierId(tierId)
+-	if tierId >= KnifeData.TierCount then
+-		return nil -- Mythique : rien au-dessus
++	if type(tierId) ~= "number" or tierId < 1 or tierId >= KnifeData.TierCount then
++		return nil
+ 	end
+ 	return tierId + 1
+ end
+ 
+---[[
+-	getRandomTier()
+-	Tire un tier au hasard, pondéré par les DropWeight.
+-	Renvoie le NUMÉRO du tier (1 à 6).
+-
+-	Principe de la "roue pondérée" :
+-	on tire un nombre entre 0 et poidsTotal, puis on avance tier par tier
+-	en retirant leur poids jusqu'à tomber en dessous de zéro.
+---]]
++-- Tire un numéro de tier en respectant les DropWeight ci-dessus.
+ function KnifeData.getRandomTier()
+ 	local tirage = rng:NextNumber(0, poidsTotal)
+ 
+@@ -118,15 +100,10 @@ function KnifeData.getRandomTier()
+ 		end
+ 	end
+ 
+-	-- Sécurité : ne devrait jamais arriver (erreurs d'arrondi flottant).
++	-- Sécurité contre un éventuel arrondi flottant.
+ 	return 1
+ end
+ 
+---[[
+-	getDropPercent(tierId)
+-	Renvoie la probabilité de drop du tier en POURCENTAGE (ex : 25 pour 25 %).
+-	Utile pour l'affichage et pour l'équilibrage de l'étape 8.
+---]]
+ function KnifeData.getDropPercent(tierId)
+ 	local tier = KnifeData.Tiers[tierId]
+ 	if not tier then
+diff --git a/StarterPlayerScripts/CodexClient.client.lua b/StarterPlayerScripts/CodexClient.client.lua
+index a7e7ea9..ed3e496 100644
+--- a/StarterPlayerScripts/CodexClient.client.lua
++++ b/StarterPlayerScripts/CodexClient.client.lua
+@@ -13,6 +13,7 @@
+ 
+ local Players = game:GetService("Players")
+ local ReplicatedStorage = game:GetService("ReplicatedStorage")
++local RunService = game:GetService("RunService")
+ 
+ local getInventory = ReplicatedStorage:WaitForChild("GetInventory")
+ local inventoryUpdated = ReplicatedStorage:WaitForChild("InventoryUpdated")
+@@ -30,6 +31,22 @@ local snapshot = nil
+ -- même si le joueur n'en possède plus aucun exemplaire.
+ local dejaVus = {}
+ 
++-- Labels du tier Cosmique (T8), animés même lorsqu'il est encore "???".
++local labelsCosmiques = {}
++
++RunService.RenderStepped:Connect(function()
++	local couleurArcEnCiel = Color3.fromHSV((os.clock() * 0.18) % 1, 0.85, 1)
++
++	for index = #labelsCosmiques, 1, -1 do
++		local label = labelsCosmiques[index]
++		if label.Parent then
++			label.TextColor3 = couleurArcEnCiel
++		else
++			table.remove(labelsCosmiques, index)
++		end
++	end
++end)
++
+ ---------------------------------------------------------------------
+ -- CONSTRUCTION DE L'INTERFACE
+ ---------------------------------------------------------------------
+@@ -43,6 +60,7 @@ screenGui.Parent = playerGui
+ local panneau = Instance.new("Frame")
+ panneau.AnchorPoint = Vector2.new(0.5, 0.5)
+ panneau.Position = UDim2.fromScale(0.5, 0.5)
++-- Taille fixe : la liste du Codex est défilable.
+ panneau.Size = UDim2.fromOffset(460, 470)
+ panneau.BackgroundColor3 = Color3.fromRGB(28, 24, 20)
+ panneau.BorderSizePixel = 0
+@@ -93,11 +111,29 @@ progression.TextColor3 = Color3.fromRGB(190, 190, 200)
+ progression.TextSize = 17
+ progression.Parent = panneau
+ 
+-local liste = Instance.new("Frame")
++local statsLabel = Instance.new("TextLabel")
++statsLabel.Name = "FusionStats"
++statsLabel.Position = UDim2.new(0, 0, 0, 82)
++statsLabel.Size = UDim2.new(1, 0, 0, 22)
++statsLabel.BackgroundTransparency = 1
++statsLabel.Font = Enum.Font.GothamMedium
++statsLabel.Text = "Critiques : 0  |  Dorées : 0"
++statsLabel.TextColor3 = Color3.fromRGB(220, 220, 230)
++statsLabel.TextSize = 14
++statsLabel.Parent = panneau
++
++-- Liste défilable : le tier Cosmique reste accessible sans agrandir l'écran.
++local liste = Instance.new("ScrollingFrame")
+ liste.Name = "List"
+-liste.Position = UDim2.new(0, 16, 0, 94)
+-liste.Size = UDim2.new(1, -32, 1, -110)
++liste.Position = UDim2.new(0, 16, 0, 112)
++liste.Size = UDim2.new(1, -32, 1, -128)
+ liste.BackgroundTransparency = 1
++liste.BorderSizePixel = 0
++liste.ScrollBarThickness = 7
++liste.ScrollBarImageColor3 = Color3.fromRGB(255, 215, 140)
++liste.ScrollingDirection = Enum.ScrollingDirection.Y
++liste.AutomaticCanvasSize = Enum.AutomaticSize.Y
++liste.CanvasSize = UDim2.new(0, 0, 0, 0)
+ liste.Parent = panneau
+ 
+ local layout = Instance.new("UIListLayout")
+@@ -114,6 +150,9 @@ local function rafraichir()
+ 		return
+ 	end
+ 
++	-- Les anciennes lignes vont être détruites : on réinitialise l'animation.
++	labelsCosmiques = {}
++
+ 	for _, enfant in ipairs(liste:GetChildren()) do
+ 		if enfant:IsA("Frame") then
+ 			enfant:Destroy()
+@@ -188,11 +227,27 @@ local function rafraichir()
+ 		quantite.Text = possede and ("x" .. info.count) or "-"
+ 		quantite.TextColor3 = possede and Color3.fromRGB(220, 220, 230) or Color3.fromRGB(85, 85, 95)
+ 		quantite.Parent = ligne
++
++		-- Le dernier mystère du Codex est visuellement spécial :
++		-- "???", son symbole et sa quantité ont l'animation arc-en-ciel,
++		-- qu'il soit encore verrouillé ou déjà découvert.
++		if info.id == 8 then
++			table.insert(labelsCosmiques, coche)
++			table.insert(labelsCosmiques, nom)
++			table.insert(labelsCosmiques, quantite)
++		end
+ 	end
+ 
+ 	local total = #snapshot.tiers
+ 	progression.Text = decouverts .. " / " .. total .. " couteaux découverts"
+ 
++	local stats = snapshot.stats or { criticalFusions = 0, goldenFusions = 0 }
++	statsLabel.Text = string.format(
++		"⚡ Critiques : %d  |  ✨ Dorées : %d",
++		stats.criticalFusions or 0,
++		stats.goldenFusions or 0
++	)
++
+ 	-- Collection complète : on félicite le joueur.
+ 	if decouverts == total then
+ 		progression.Text = "COLLECTION COMPLÈTE ! " .. decouverts .. " / " .. total
+diff --git a/StarterPlayerScripts/ForgeClient.client.lua b/StarterPlayerScripts/ForgeClient.client.lua
+index d237643..7ab69ab 100644
+--- a/StarterPlayerScripts/ForgeClient.client.lua
++++ b/StarterPlayerScripts/ForgeClient.client.lua
+@@ -4,7 +4,7 @@
+ 
+ 	Rôle : l'interface de fusion.
+ 	       - s'ouvre quand le serveur envoie "OpenForge"
+-	       - liste les 6 tiers, seuls ceux avec 2 couteaux ou plus sont cliquables
++	       - liste les 8 tiers, seuls ceux avec 2 couteaux ou plus sont cliquables
+ 	       - affiche la chance de réussite (tier + chauffe)
+ 	       - le bouton "Fusionner" envoie la demande au serveur
+ 
+@@ -14,6 +14,7 @@
+ 
+ local Players = game:GetService("Players")
+ local ReplicatedStorage = game:GetService("ReplicatedStorage")
++local RunService = game:GetService("RunService")
+ 
+ local forgeEvent = ReplicatedStorage:WaitForChild("ForgeEvent")
+ local getInventory = ReplicatedStorage:WaitForChild("GetInventory")
+@@ -29,6 +30,22 @@ local snapshot = nil        -- dernière photo de l'inventaire reçue
+ local tierSelectionne = nil -- numéro du tier choisi par le joueur
+ local enAttente = false     -- true pendant les 1,5 s de suspens
+ 
++-- Labels du tier Cosmique (T8), animés en arc-en-ciel.
++local labelsCosmiques = {}
++
++RunService.RenderStepped:Connect(function()
++	local couleurArcEnCiel = Color3.fromHSV((os.clock() * 0.18) % 1, 0.85, 1)
++
++	for index = #labelsCosmiques, 1, -1 do
++		local label = labelsCosmiques[index]
++		if label.Parent then
++			label.TextColor3 = couleurArcEnCiel
++		else
++			table.remove(labelsCosmiques, index)
++		end
++	end
++end)
++
+ ---------------------------------------------------------------------
+ -- CONSTRUCTION DE L'INTERFACE
+ ---------------------------------------------------------------------
+@@ -44,6 +61,7 @@ local panneau = Instance.new("Frame")
+ panneau.Name = "Panel"
+ panneau.AnchorPoint = Vector2.new(0.5, 0.5)
+ panneau.Position = UDim2.fromScale(0.5, 0.5)
++-- Taille fixe : la liste des tiers est défilable, même sur petit écran.
+ panneau.Size = UDim2.fromOffset(520, 540)
+ panneau.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
+ panneau.BorderSizePixel = 0
+@@ -97,11 +115,18 @@ consigne.TextSize = 15
+ consigne.Parent = panneau
+ 
+ -- La liste des tiers.
+-local liste = Instance.new("Frame")
++-- Liste défilable : T8 reste accessible sur toutes les résolutions.
++local liste = Instance.new("ScrollingFrame")
+ liste.Name = "List"
+ liste.Position = UDim2.new(0, 16, 0, 92)
+ liste.Size = UDim2.new(1, -32, 0, 288)
+ liste.BackgroundTransparency = 1
++liste.BorderSizePixel = 0
++liste.ScrollBarThickness = 7
++liste.ScrollBarImageColor3 = Color3.fromRGB(200, 130, 40)
++liste.ScrollingDirection = Enum.ScrollingDirection.Y
++liste.AutomaticCanvasSize = Enum.AutomaticSize.Y
++liste.CanvasSize = UDim2.new(0, 0, 0, 0)
+ liste.Parent = panneau
+ 
+ local layout = Instance.new("UIListLayout")
+@@ -163,7 +188,7 @@ local function rafraichirChance()
+ 
+ 	local info = snapshot.tiers[tierSelectionne]
+ 
+-	-- Cas limite : le Mythique n'a pas de tier au-dessus.
++	-- Cas limite : le Cosmique n'a pas de tier au-dessus.
+ 	if tierSelectionne == #snapshot.tiers then
+ 		infoChance.Text = "Déjà au maximum !\nAucun couteau au-dessus du " .. info.name .. "."
+ 		boutonFusionner.BackgroundColor3 = Color3.fromRGB(70, 70, 85)
+@@ -174,7 +199,8 @@ local function rafraichirChance()
+ 	-- Le même calcul que ForgeLogic.getChance() côté serveur.
+ 	local base = info.fusionChance
+ 	local chauffe = snapshot.heat
+-	local total = math.min(base + chauffe, 1)
++	-- La frappe peut ajouter jusqu'à +15 %, mais le total réel reste plafonné à 95 %.
++	local total = math.min(base + chauffe, 0.95)
+ 
+ 	infoChance.Text = string.format(
+ 		"%s  ->  %s\nChance : %d %%  +  %d %% de chauffe  =  %d %%",
+@@ -190,8 +216,11 @@ local function rafraichirChance()
+ 	boutonFusionner.Text = "FUSIONNER"
+ end
+ 
+--- Reconstruit la liste des 6 tiers.
++	-- Reconstruit la liste des 8 tiers.
+ local function rafraichirListe()
++	-- Les anciennes lignes vont être détruites : on repart d'une liste propre.
++	labelsCosmiques = {}
++
+ 	for _, enfant in ipairs(liste:GetChildren()) do
+ 		if enfant:IsA("TextButton") then
+ 			enfant:Destroy()
+@@ -233,6 +262,11 @@ local function rafraichirListe()
+ 			ligne.BackgroundColor3 = Color3.fromRGB(38, 38, 48)
+ 		end
+ 
++		-- Même s'il n'est pas encore utilisable, le T8 garde son effet arc-en-ciel.
++		if info.id == 8 then
++			table.insert(labelsCosmiques, ligne)
++		end
++
+ 		if disponible then
+ 			-- Cliquable : on peut le choisir.
+ 			ligne.MouseButton1Click:Connect(function()
+@@ -278,9 +312,9 @@ boutonFusionner.MouseButton1Click:Connect(function()
+ 		return
+ 	end
+ 
+-	-- Le Mythique : on prévient sans même déranger le serveur.
++	-- Le Cosmique : on prévient sans même déranger le serveur.
+ 	if tierSelectionne == #snapshot.tiers then
+-		infoChance.Text = "Déjà au maximum !\nAucun couteau au-dessus du Mythique."
++		infoChance.Text = "Déjà au niveau cosmique !"
+ 		return
+ 	end
+ 
+@@ -290,7 +324,8 @@ boutonFusionner.MouseButton1Click:Connect(function()
+ 	boutonFusionner.BackgroundColor3 = Color3.fromRGB(90, 70, 40)
+ 	infoChance.Text = "Le marteau s'abat sur l'enclume..."
+ 
+-	forgeEvent:FireServer("RequestFusion", tierSelectionne)
++	-- Le serveur vérifie l'état puis demande à PerfectStrikeClient d'ouvrir le mini-jeu.
++	forgeEvent:FireServer("StartStrike", tierSelectionne)
+ end)
+ 
+ ---------------------------------------------------------------------
+@@ -305,6 +340,26 @@ forgeEvent.OnClientEvent:Connect(function(action, donnees)
+ 		screenGui.Enabled = true
+ 		rafraichirTout()
+ 
++	elseif action == "StrikeFeedback" then
++		-- Le serveur confirme le bonus et affiche le vrai pourcentage plafonné à 95 %.
++		local bonusPourcent = math.floor(donnees.bonus * 100 + 0.5)
++		infoChance.Text = string.format(
++			"Frappe +%d %% !\n%d %% base + %d %% chauffe + %d %% frappe = %d %%",
++			bonusPourcent,
++			math.floor(donnees.base * 100 + 0.5),
++			math.floor(donnees.chauffe * 100 + 0.5),
++			bonusPourcent,
++			math.floor(donnees.chanceFinale * 100 + 0.5)
++		)
++		infoChance.TextColor3 = bonusPourcent == 15 and Color3.fromRGB(255, 215, 70)
++			or (bonusPourcent == 5 and Color3.fromRGB(100, 230, 130) or Color3.fromRGB(255, 130, 100))
++
++	elseif action == "StrikeCancelled" then
++		enAttente = false
++		infoChance.Text = donnees
++		infoChance.TextColor3 = Color3.fromRGB(255, 200, 100)
++		rafraichirListe()
++
+ 	elseif action == "ForgeResult" then
+ 		enAttente = false
+ 
+diff --git a/StarterPlayerScripts/FusionEffectsClient.client.lua b/StarterPlayerScripts/FusionEffectsClient.client.lua
+new file mode 100644
+index 0000000..5071b8c
+--- /dev/null
++++ b/StarterPlayerScripts/FusionEffectsClient.client.lua
+@@ -0,0 +1,55 @@
++-- FusionEffectsClient : effets locaux des fusions critique et dorée.
++local Players = game:GetService("Players")
++local ReplicatedStorage = game:GetService("ReplicatedStorage")
++local TweenService = game:GetService("TweenService")
++
++local forgeEvent = ReplicatedStorage:WaitForChild("ForgeEvent")
++local gui = Instance.new("ScreenGui")
++gui.Name = "FusionEffectsGui"
++gui.ResetOnSpawn = false
++gui.DisplayOrder = 30
++gui.Parent = Players.LocalPlayer:WaitForChild("PlayerGui")
++
++local flash = Instance.new("Frame")
++flash.Size = UDim2.fromScale(1, 1)
++flash.BackgroundTransparency = 1
++flash.BorderSizePixel = 0
++flash.Parent = gui
++
++local message = Instance.new("TextLabel")
++message.AnchorPoint = Vector2.new(0.5, 0.5)
++message.Position = UDim2.fromScale(0.5, 0.35)
++message.Size = UDim2.fromOffset(700, 100)
++message.BackgroundTransparency = 1
++message.Font = Enum.Font.GothamBlack
++message.TextScaled = true
++message.TextStrokeTransparency = 0.25
++message.Visible = false
++message.Parent = gui
++
++local function showEffect(kind)
++	local golden = kind == "golden"
++	local color = golden and Color3.fromRGB(255, 210, 60) or Color3.fromRGB(255, 230, 100)
++	message.Text = golden and "✨ FUSION DORÉE !" or "⚡ FUSION CRITIQUE !"
++	message.TextColor3 = color
++	message.Visible = true
++	flash.BackgroundColor3 = color
++	flash.BackgroundTransparency = 0.55
++
++	-- Petit tremblement visuel de l'annonce.
++	for _ = 1, 5 do
++		message.Position = UDim2.fromScale(0.5 + math.random(-12, 12) / 1000, 0.35)
++		task.wait(0.04)
++	end
++	message.Position = UDim2.fromScale(0.5, 0.35)
++
++	TweenService:Create(flash, TweenInfo.new(0.6), { BackgroundTransparency = 1 }):Play()
++	task.wait(1.2)
++	message.Visible = false
++end
++
++forgeEvent.OnClientEvent:Connect(function(action, data)
++	if action == "ForgeResult" and data and (data.type == "critical" or data.type == "golden") then
++		showEffect(data.type)
++	end
++end)
+diff --git a/StarterPlayerScripts/InventoryClient.client.lua b/StarterPlayerScripts/InventoryClient.client.lua
+index 244fa27..5722cc3 100644
+--- a/StarterPlayerScripts/InventoryClient.client.lua
++++ b/StarterPlayerScripts/InventoryClient.client.lua
+@@ -2,69 +2,99 @@
+ 	InventoryClient (LocalScript)
+ 	Emplacement : StarterPlayer > StarterPlayerScripts > InventoryClient
+ 
+-	Rôle : remplit le panneau SurfaceGui avec l'inventaire du joueur local.
+-	       - au démarrage : demande l'inventaire au serveur (RemoteFunction)
+-	       - ensuite      : écoute le RemoteEvent "InventoryUpdated"
+-
+-	Comme le panneau est dessiné par CHAQUE client, chaque joueur
+-	voit son propre inventaire sur la même Part.
++	Rôle :
++	- Affiche l'inventaire du joueur dans le SurfaceGui du monde.
++	- Affiche les 8 tiers envoyés par le serveur.
++	- Anime le texte du tier Cosmique (T8) avec un arc-en-ciel lisible.
+ --]]
+ 
+ local ReplicatedStorage = game:GetService("ReplicatedStorage")
++local RunService = game:GetService("RunService")
+ 
+ local getInventory = ReplicatedStorage:WaitForChild("GetInventory")
+ local inventoryUpdated = ReplicatedStorage:WaitForChild("InventoryUpdated")
+ 
+--- On attend que le panneau existe dans le monde.
+ local forgeMap = workspace:WaitForChild("ForgeMap")
+ local board = forgeMap:WaitForChild("InventoryBoard")
+ local gui = board:WaitForChild("InventoryGui")
+ local root = gui:WaitForChild("Root")
+ local list = root:WaitForChild("List")
+ 
++-- T8 est le tier Cosmique dans KnifeData.
++local COSMIC_TIER_ID = 8
++
++-- Contient les labels du Cosmique actuellement affichés.
++-- Ils sont recolorés à chaque image par l'animation arc-en-ciel.
++local labelsCosmiques = {}
++
+ ---------------------------------------------------------------------
+--- CRÉATION D'UNE LIGNE DU TABLEAU
++-- ANIMATION ARC-EN-CIEL DU COSMIQUE
+ ---------------------------------------------------------------------
+ 
+--- Fabrique une ligne "● Rare .......... x3" pour un tier donné.
+-local function creerLigne(tierInfo)
++RunService.RenderStepped:Connect(function()
++	local hue = (os.clock() * 0.18) % 1
++	local couleurArcEnCiel = Color3.fromHSV(hue, 0.85, 1)
++
++	for index = #labelsCosmiques, 1, -1 do
++		local label = labelsCosmiques[index]
++
++		-- Une ligne supprimée lors d'une mise à jour ne doit plus être animée.
++		if label.Parent then
++			label.TextColor3 = couleurArcEnCiel
++		else
++			table.remove(labelsCosmiques, index)
++		end
++	end
++end)
++
++---------------------------------------------------------------------
++-- CRÉATION D'UNE LIGNE D'INVENTAIRE
++---------------------------------------------------------------------
++
++local function creerLigne(tierInfo, nombreDeTiers)
+ 	local ligne = Instance.new("TextLabel")
+ 	ligne.Name = "Tier" .. tierInfo.id
+ 	ligne.LayoutOrder = tierInfo.id
+-	ligne.Size = UDim2.new(1, 0, 0, 48)
++
++	-- Le -6 compense les espaces du UIListLayout et du UIPadding.
++	-- Les 8 tiers tiennent ainsi dans le SurfaceGui.
++	ligne.Size = UDim2.new(1, 0, 1 / nombreDeTiers, -6)
+ 	ligne.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+ 	ligne.BackgroundTransparency = 0.3
+ 	ligne.BorderSizePixel = 0
+ 	ligne.Font = Enum.Font.GothamMedium
+-	ligne.TextSize = 30
++	ligne.TextScaled = true
+ 	ligne.TextXAlignment = Enum.TextXAlignment.Left
+-	-- La couleur du texte EST la couleur du tier : lecture immédiate.
+ 	ligne.TextColor3 = tierInfo.color
+-	ligne.Text = string.format("  %s", tierInfo.name)
++	ligne.Text = "  " .. tierInfo.name
+ 
+-	-- La quantité, alignée à droite dans la même ligne.
+ 	local quantite = Instance.new("TextLabel")
+ 	quantite.Name = "Count"
+ 	quantite.Size = UDim2.fromScale(1, 1)
+ 	quantite.BackgroundTransparency = 1
+ 	quantite.Font = Enum.Font.GothamBold
+-	quantite.TextSize = 30
++	quantite.TextScaled = true
+ 	quantite.TextXAlignment = Enum.TextXAlignment.Right
+ 	quantite.TextColor3 = tierInfo.color
+ 	quantite.Text = "x" .. tierInfo.count .. "  "
+ 	quantite.Parent = ligne
+ 
+-	-- Un tier qu'on ne possède pas est grisé.
+ 	if tierInfo.count == 0 then
+ 		ligne.TextTransparency = 0.6
+ 		quantite.TextTransparency = 0.6
+ 	end
+ 
++	-- T8 reçoit une couleur animée claire, même lorsqu'il n'est pas possédé.
++	if tierInfo.id == COSMIC_TIER_ID then
++		table.insert(labelsCosmiques, ligne)
++		table.insert(labelsCosmiques, quantite)
++	end
++
+ 	return ligne
+ end
+ 
+ ---------------------------------------------------------------------
+--- MISE À JOUR COMPLÈTE DU PANNEAU
++-- MISE À JOUR DE L'INVENTAIRE
+ ---------------------------------------------------------------------
+ 
+ local function afficher(snapshot)
+@@ -72,23 +102,35 @@ local function afficher(snapshot)
+ 		return
+ 	end
+ 
+-	-- On efface les anciennes lignes (on garde le UIListLayout et le UIPadding).
++	-- Réinitialise la liste des labels à animer avant de détruire les lignes.
++	labelsCosmiques = {}
++
++	-- Supprime les anciennes lignes. Le UIListLayout et le UIPadding sont gardés.
+ 	for _, enfant in ipairs(list:GetChildren()) do
+ 		if enfant:IsA("TextLabel") then
+ 			enfant:Destroy()
+ 		end
+ 	end
+ 
+-	-- On redessine les 6 lignes.
++	local nombreDeTiers = #snapshot.tiers
++	if nombreDeTiers == 0 then
++		return
++	end
++
++	-- Crée les huit lignes : T1 à T8.
+ 	for _, tierInfo in ipairs(snapshot.tiers) do
+-		creerLigne(tierInfo).Parent = list
++		local ligne = creerLigne(tierInfo, nombreDeTiers)
++		ligne.Parent = list
+ 	end
+ 
+-	-- Le titre affiche aussi la chauffe de forge (utile dès l'étape 6).
++	-- Met à jour le titre avec la chauffe de forge.
+ 	local titre = root:FindFirstChild("Title")
+ 	if titre then
+ 		if snapshot.heat > 0 then
+-			titre.Text = string.format("INVENTAIRE  —  Chauffe +%d%%", math.floor(snapshot.heat * 100 + 0.5))
++			titre.Text = string.format(
++				"INVENTAIRE  —  Chauffe +%d%%",
++				math.floor(snapshot.heat * 100 + 0.5)
++			)
+ 		else
+ 			titre.Text = "INVENTAIRE"
+ 		end
+@@ -96,11 +138,9 @@ local function afficher(snapshot)
+ end
+ 
+ ---------------------------------------------------------------------
+--- BRANCHEMENTS
++-- COMMUNICATION AVEC LE SERVEUR
+ ---------------------------------------------------------------------
+ 
+--- Le serveur pousse une mise à jour à chaque changement.
+ inventoryUpdated.OnClientEvent:Connect(afficher)
+ 
+--- Premier affichage : on demande l'état actuel.
+ afficher(getInventory:InvokeServer())
+diff --git a/StarterPlayerScripts/PerfectStrikeClient.client.lua b/StarterPlayerScripts/PerfectStrikeClient.client.lua
+new file mode 100644
+index 0000000..aa4a8ee
+--- /dev/null
++++ b/StarterPlayerScripts/PerfectStrikeClient.client.lua
+@@ -0,0 +1,178 @@
++--[[
++	PerfectStrikeClient (LocalScript)
++	Emplacement : StarterPlayer > StarterPlayerScripts > PerfectStrikeClient
++
++	Mini-jeu de l'étape 2 : le curseur se déplace continuellement.
++	Le joueur clique, tape ou appuie sur E pour frapper.
++--]]
++
++local Players = game:GetService("Players")
++local ReplicatedStorage = game:GetService("ReplicatedStorage")
++local RunService = game:GetService("RunService")
++local UserInputService = game:GetService("UserInputService")
++
++local forgeEvent = ReplicatedStorage:WaitForChild("ForgeEvent")
++local playerGui = Players.LocalPlayer:WaitForChild("PlayerGui")
++
++local actif = false
++local depart = 0
++local connexionAnimation = nil
++
++local gui = Instance.new("ScreenGui")
++gui.Name = "PerfectStrikeGui"
++gui.ResetOnSpawn = false
++gui.DisplayOrder = 20
++gui.Enabled = false
++gui.Parent = playerGui
++
++local panneau = Instance.new("Frame")
++panneau.AnchorPoint = Vector2.new(0.5, 0.5)
++panneau.Position = UDim2.fromScale(0.5, 0.72)
++panneau.Size = UDim2.fromOffset(560, 170)
++panneau.BackgroundColor3 = Color3.fromRGB(25, 25, 32)
++panneau.BorderSizePixel = 0
++panneau.Parent = gui
++
++local coins = Instance.new("UICorner")
++coins.CornerRadius = UDim.new(0, 12)
++coins.Parent = panneau
++
++local titre = Instance.new("TextLabel")
++titre.Size = UDim2.new(1, 0, 0, 42)
++titre.BackgroundTransparency = 1
++titre.Font = Enum.Font.GothamBold
++titre.Text = "FRAPPE L'ENCLUME !"
++titre.TextColor3 = Color3.fromRGB(255, 220, 150)
++titre.TextSize = 24
++titre.Parent = panneau
++
++local barre = Instance.new("Frame")
++barre.AnchorPoint = Vector2.new(0.5, 0)
++barre.Position = UDim2.new(0.5, 0, 0, 58)
++barre.Size = UDim2.fromOffset(480, 44)
++barre.BackgroundColor3 = Color3.fromRGB(55, 55, 66)
++barre.BorderSizePixel = 0
++barre.Parent = panneau
++
++local coinsBarre = Instance.new("UICorner")
++coinsBarre.CornerRadius = UDim.new(0, 8)
++coinsBarre.Parent = barre
++
++-- Zone "Bien" : 30 % de la largeur, au centre.
++local zoneBien = Instance.new("Frame")
++zoneBien.AnchorPoint = Vector2.new(0.5, 0.5)
++zoneBien.Position = UDim2.fromScale(0.5, 0.5)
++zoneBien.Size = UDim2.fromScale(0.30, 0.82)
++zoneBien.BackgroundColor3 = Color3.fromRGB(80, 160, 100)
++zoneBien.BorderSizePixel = 0
++zoneBien.Parent = barre
++
++local coinsBien = Instance.new("UICorner")
++coinsBien.CornerRadius = UDim.new(0, 6)
++coinsBien.Parent = zoneBien
++
++-- Zone "Parfait" : 15 % de la largeur, exactement au centre.
++local zoneParfaite = Instance.new("Frame")
++zoneParfaite.AnchorPoint = Vector2.new(0.5, 0.5)
++zoneParfaite.Position = UDim2.fromScale(0.5, 0.5)
++zoneParfaite.Size = UDim2.fromScale(0.15, 0.82)
++zoneParfaite.BackgroundColor3 = Color3.fromRGB(255, 205, 70)
++zoneParfaite.BorderSizePixel = 0
++zoneParfaite.Parent = barre
++
++local coinsParfait = Instance.new("UICorner")
++coinsParfait.CornerRadius = UDim.new(0, 6)
++coinsParfait.Parent = zoneParfaite
++
++local curseur = Instance.new("Frame")
++curseur.AnchorPoint = Vector2.new(0.5, 0.5)
++curseur.Position = UDim2.fromScale(0, 0.5)
++curseur.Size = UDim2.fromOffset(10, 54)
++curseur.BackgroundColor3 = Color3.fromRGB(245, 245, 255)
++curseur.BorderSizePixel = 0
++curseur.Parent = barre
++
++local coinsCurseur = Instance.new("UICorner")
++coinsCurseur.CornerRadius = UDim.new(0, 4)
++coinsCurseur.Parent = curseur
++
++local instruction = Instance.new("TextLabel")
++instruction.Position = UDim2.new(0, 0, 0, 112)
++instruction.Size = UDim2.new(1, 0, 0, 42)
++instruction.BackgroundTransparency = 1
++instruction.Font = Enum.Font.GothamMedium
++instruction.Text = "Clique, tape ou appuie sur E dans la zone dorée : +15 %"
++instruction.TextColor3 = Color3.fromRGB(220, 220, 230)
++instruction.TextSize = 16
++instruction.Parent = panneau
++
++local function fermer()
++	actif = false
++	gui.Enabled = false
++	if connexionAnimation then
++		connexionAnimation:Disconnect()
++		connexionAnimation = nil
++	end
++end
++
++-- Tier actuellement envoyé par le serveur au démarrage du mini-jeu.
++local tierEnCours = nil
++
++local function envoyerFrappe()
++	if not actif then
++		return
++	end
++
++	local temps = os.clock() - depart
++	local position = (math.sin(temps * 4) + 1) / 2
++	local distanceCentre = math.abs(position - 0.5)
++	local bonus = 0
++
++	if distanceCentre <= 0.075 then
++		bonus = 0.15
++	elseif distanceCentre <= 0.15 then
++		bonus = 0.05
++	end
++
++	fermer()
++	forgeEvent:FireServer("StrikeResult", tierEnCours, bonus)
++end
++
++barre.InputBegan:Connect(function(input)
++	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
++		envoyerFrappe()
++	end
++end)
++
++UserInputService.InputBegan:Connect(function(input, traiteParJeu)
++	if traiteParJeu or not actif then
++		return
++	end
++
++	if input.KeyCode == Enum.KeyCode.E or input.UserInputType == Enum.UserInputType.MouseButton1 then
++		envoyerFrappe()
++	end
++end)
++
++forgeEvent.OnClientEvent:Connect(function(action, donnees)
++	if action == "StartStrike" then
++		tierEnCours = donnees
++		actif = true
++		depart = os.clock()
++		gui.Enabled = true
++
++		if connexionAnimation then
++			connexionAnimation:Disconnect()
++		end
++
++		connexionAnimation = RunService.RenderStepped:Connect(function()
++			if actif then
++				local position = (math.sin((os.clock() - depart) * 4) + 1) / 2
++				curseur.Position = UDim2.fromScale(position, 0.5)
++			end
++		end)
++
++	elseif action == "StrikeCancelled" then
++		fermer()
++	end
++end)
