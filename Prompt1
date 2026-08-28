@@ -1,0 +1,398 @@
+Tu es un développeur Roblox Studio expert en Luau. Tu vas m'aider à faire évoluer
+la démo jouable de "Forge des Lames" vers une version bêta complète, étape par étape.
+
+⚠️ RÈGLES DE FONCTIONNEMENT :
+- Ne passe JAMAIS à l'étape suivante sans que je te le demande explicitement.
+- À chaque étape, donne-moi le code COMPLET à coller, et dis-moi EXACTEMENT où le mettre
+  (quel service Workspace/ServerScriptService/ReplicatedStorage, quel script, quel nom).
+- Explique brièvement comment tester l'étape dans Roblox Studio.
+- Code simple et lisible, commenté en français.
+- Aucune optimisation prématurée, aucun module non nécessaire.
+- Si une étape dépend d'éléments créés dans une étape précédente, référence-les exactement
+  par leur nom (ex. : le ModuleScript "KnifeData" dans ServerStorage, le RemoteEvent
+  "ForgeEvent" dans ReplicatedStorage, etc.), et annule si je n'ai pas fait l'étape précédente.
+
+──────────────────────────────────────────
+CONTEXTE — ÉTAT ACTUEL DU PROJET
+──────────────────────────────────────────
+La démo de base est TERMINÉE et fonctionnelle. Voici ce qui existe déjà :
+
+STRUCTURE DU PROJET :
+- ServerStorage ► "ForgeKnives" :
+  - ModuleScript "KnifeData" : données des 6 tiers de couteaux (nom, couleur, %, poids de drop)
+  - ModuleScript "ForgeLogic" : logique de fusion (tiers supérieur, chauffe de forge)
+- ReplicatedStorage :
+  - RemoteEvent "ForgeEvent" : communication client ↔ serveur pour la forge
+- Workspace :
+  - Une baseplate (terrain plat)
+  - Une enclume avec ProximityPrompt "Forger"
+  - 3 caisses avec ProximityPrompt "Ouvrir"
+- SurfaceGui sur le joueur ou dans le Workspace pour l'inventaire
+
+MÉCANIQUES DÉJÀ IMPLÉMENTÉES (démo) :
+1. ✅ Ouverture de caisse → reçoit 1 couteau aléatoire pondéré (T1→T6)
+2. ✅ Inventaire serveur (compte par tier) + interface SurfaceGui
+3. ✅ Forge : placer 2 couteaux identiques → afficher % → bouton "Fusionner"
+4. ✅ Fusion réussie → couteau du tier +1 ; fusion échouée → perd 1 couteau + chauffe +2 %
+5. ✅ Chauffe de forge : +2 % par échec, plafond +40 %, affichée à l'écran
+6. ✅ Codex basique (liste des 6 tiers avec ✓/○)
+7. ✅ 6 tiers : Commun (gris, 100%), Inhabituel (vert, 90%), Rare (bleu, 75%),
+    Épique (violet, 60%), Légendaire (or, 45%), Mythique (rouge, 30%)
+
+Ce qui n'est PAS encore fait (c'est l'objet de ce prompt) :
+- Mini-jeu de frappe parfaite au moment de la fusion
+- Fusion critique (saut de 2 tiers) et fusion dorée (garantie + critique)
+- Sauvegarde DataStore (persistance cross-session)
+- Vitrine de collection (statut social)
+- Sistema de trading / fusion coop
+- Nouveaux items, cosmétiques, monétisation Robux
+- Son (clang de marteau, craquement de caisse)
+- Modèles 3D de couteaux
+- Caisse premium avec meilleurs drops
+
+──────────────────────────────────────────
+JEU DE DONNÉES — KNIFE DATA (8 TIERS)
+──────────────────────────────────────────
+Le GDD finalise le jeu à 8 tiers. La démo en a 6. Pour la bêta, on passe à 8 tiers.
+
+| Tier | Nom        | Couleur                | % Fusion de base | Poids de drop |
+|------|------------|------------------------|-------------------|---------------|
+| T1   | Commun     | Gris (Color3.new(0.5,0.5,0.5))   | 100 %             | 40            |
+| T2   | Inhabituel | Vert (Color3.new(0,0.8,0))       | 90 %              | 25            |
+| T3   | Rare       | Bleu (Color3.new(0,0.4,1))       | 75 %              | 15            |
+| T4   | Épique     | Violet (Color3.new(0.6,0,1))     | 60 %              | 8             |
+| T5   | Légendaire | Or (Color3.new(1,0.85,0))        | 45 %              | 4             |
+| T6   | Mythique   | Rouge (Color3.new(1,0.2,0.1))    | 30 %              | 2             |
+| T7   | Divin      | Iridescent (bleu-violet pâle, ex. Color3.new(0.5,0.3,0.9)) | 18 % | 1 |
+| T8   | Cosmique   | Noir/étoiles (ex. Color3.new(0.1,0.1,0.2) avec effet) | 10 % | 0.5 |
+
+> Les poids sont relatifs. Pour getRandomTier(), utilise une somme pondérée.
+> Un poids de 0.5 pour T8 signifie qu'en moyenne, 1 T8 pour 80 T1.
+
+──────────────────────────────────────────
+ÉTAPE 1 — Nettoyage + mise à jour vers 8 tiers
+──────────────────────────────────────────
+1.1. Dans le ModuleScript "KnifeData" de ServerStorage, ajoute les tiers T7 (Divin)
+     et T8 (Cosmique) avec leurs données (nom, couleur, %, poids).
+     Garde la même structure de tableau/object que les 6 tiers existants.
+
+1.2. Mets à jour la fonction getRandomTier() pour inclure les 8 tiers avec les nouveaux poids.
+
+1.3. Dans ForgeLogic, mets à jour la logique "tier supérieur" :
+     - T1→T2, T2→T3, …, T7→T8
+     - T8→T8 : fusion de 2 Cosmiques = message spécial "Déjà au niveau cosmique !"
+       (pas de tier au-dessus, mais bonus cosmétique ou éclats)
+
+1.4. Vérifie que l'inventaire SurfaceGui affiche bien les 8 tiers.
+
+Teste : ouvrir des caisses → la distribution doit refléter les nouveaux poids
+       (T7 et T8 très rares, T1 dominant).
+
+──────────────────────────────────────────
+ÉTAPE 2 — Le mini-jeu de frappe parfaite (Noradrénaline)
+──────────────────────────────────────────
+Contexte : le moment de la fusion n'est plus un simple bouton "Fusionner".
+Le joueur doit maintenant frapper l'enclume au bon moment pour booster ses chances.
+
+Ce qu'il faut créer :
+
+2.1. Côté CLIENT (LocalScript dans StarterPlayerScripts ou dans la GUI de la forge) :
+   - Quand le joueur active la forge et sélectionne 2 couteaux, afficher un "point de frappe"
+     animé : une cible/center qui se déplace de droite à gauche et de gauche à droite,
+     et un indicateur de "zone parfaite" (une petite zone colorée dans la cible).
+   - Quand le joueur clique/tape (ou appuie sur la touche E ou clique sur la GUI),
+     calculer la distance entre le clic et le centre de la zone parfaite.
+   - Résultat :
+     * "Parfait" (dans la zone, ~15 % de largeur) → bonus +15 % de réussite,
+       message visuel/son "CLANG !"
+     * "Bien" (proche, ~30 % de largeur) → bonus +5 %
+     * "Raté" → bonus 0 %, petit effet visuel de "mauvaise frappe"
+   - Envoyer le résultat (bonus) au serveur via le RemoteEvent existant ou un nouveau.
+
+2.2. Côté SERVEUR (ServerScriptService, script de la forge) :
+   - Recevoir le bonus de frappe.
+   - Intégrer ce bonus dans le calcul de réussite :
+     % final = % de base du tier + chauffe du joueur + bonus frappe
+   - Plafonner le % final à 95 % max (ne jamais atteindre 100 %).
+   - Laisser le reste de la logique de fusion intacte.
+
+2.3. Confirmer que la GUI de la forge affiche bien le % mis à jour incluant le bonus frappe potentiel.
+
+Teste : aller à la forge, lancer le mini-jeu, frapper au bon moment → le % affiché doit
+       refléter le bonus. Tester les 3 cas (parfait/bien/raté).
+
+──────────────────────────────────────────
+ÉTAPE 3 — Fusion critique et fusion dorée (Dopamine — erreur de prédiction positive)
+──────────────────────────────────────────
+Contexte : une fusion réussie normale donne le tier +1. Mais certaines fusions
+"surprenantes" donnent beaucoup plus, pour créer le pic dopaminergique.
+
+3.1. Dans ForgeLogic (serveur), après un succès de fusion, ajouter le tirage pour les bonus rares :
+
+   a) Fusion critique (saut de 2 tiers) :
+      - Condition : réussite normale ET tirage aléatoire supplémentaire < 5 % (0.05).
+      - Effet : le couteau obtenu est 2 tiers au-dessus (ex. T3→T5, T5→T7).
+      - Message spécial à l'écran : "⚡ FUSION CRITIQUE !" avec effet visuel (écran qui vibre, particules dorées).
+
+   b) Fusion dorée (garantie réussie + critique automatique) :
+      - Condition : tirage aléatoire < 1 % (0.01) AU DÉBUT du calcul de fusion,
+        avant même le lancer de dé.
+      - Effet : la fusion est garantie réussie ET c'est une fusion critique automatique.
+      - Message spécial : "✨ FUSION DORÉE !" avec effet très visible (écran doré, lumière).
+
+3.2. Tracer les statistiques de ces événements dans une variable de débogage (console print)
+   pour vérifier que les probabilités sont correctes au fil des sessions de test.
+
+3.3. Mettre à jour le Codex pour afficher si le joueur a jamais déclenché une fusion critique
+   ou dorée (statistique personnelle, pas obligatoire pour l'inventaire mais pour le statut).
+
+Teste : répéter des fusions T2→T3 et observer si, très rarement, on saute à T4 ou T5.
+       Pour tester la fusion dorée, temporairement augmenter la probabilité à 10 % pour voir
+       l'effet en action, puis remettre à 1 %.
+
+──────────────────────────────────────────
+ÉTAPE 4 — La persistance (DataStoreService) — POINT CRITIQUE
+──────────────────────────────────────────
+Contexte : aujourd'hui, tout se perd à la déconnexion. Pour une bêta jouable publique,
+la progression doit survivre aux déconnexions.
+
+4.1. Créer un ModuleScript "PlayerData" dans ServerStorage qui gère :
+   - La sauvegarde des données suivantes par joueur (UserId comme clé) :
+     * inventaire (table des quantités par tier : {T1=3, T2=1, T3=0, … T8=0})
+     * chauffe de forge (nombre, ex. 14 pour +14%)
+     * niveau du Maître Forgeron (nombre, ex. 3)
+     * statistiques (fusions réussies, fusions échouées, fusions critiques, fusions dorées)
+   - La fonction loadData(player) → renvoie les données chargées ou les données par défaut
+   - La fonction saveData(player, data) → sauvegarde dans DataStore
+
+4.2. Dans un Script serveur (ServerScriptService, "DataManager") :
+   - Au Join : charger les données du joueur (avec pcall pour la sécurité DataStore)
+   - Stocker les données dans une table globale ou dans une valeur membre du joueur (ex.
+     player:SetAttribute("ForgeData", …) ou une table indexée par player)
+   - À la sortie (playerleaving) : sauvegarder les données avec pcall.
+   - Gérer les erreurs DataStore (pcall, fallback sur données par défaut en cas d'échec).
+
+4.3. Modifier les scripts existants (inventaire, forge, chauffe) pour qu'ils lisent/écrivent
+   dans les données chargées au lieu de variables volatiles.
+   - L'inventaire de la GUI doit se recharger depuis les données sauvegardées à l'ouverture.
+   - La chauffe affichée doit venir des données sauvegardées.
+
+4.4. Ajouter le niveau du Maître Forgeron :
+   - Chaque fusion réussie donne 10 XP, une fusion critique 50 XP, une fusion dorée 200 XP.
+   - Niveau = floor(XP / 100) (1 niveau par 100 XP), plafond à 20.
+   - Chaque niveau donne +1 % de réussite permanente (voir GDD §5), max +20 %.
+
+4.5. Tester la persistance :
+   - Se connecter, faire des fusions, se déconnecter, se reconnecter : l'inventaire,
+     la chauffe, le niveau, et les stats doivent persister.
+
+⚠️ IMPORTANT : tester en local dans Studio, DataStore peut nécessiter de lancer le jeu
+   en mode "Play Solo" ou de configurer les permissions dans Roblox. Si DataStore ne marche
+   pas en test local, expliquer comment utiliser DataStoreService avec les settings appropriés.
+
+──────────────────────────────────────────
+ÉTAPE 5 — Le son (Endorphines — le levier n°1 de la sensation)
+──────────────────────────────────────────
+Contexte : le document GDD insiste : le son est LE levier de noradrénaline et d'endorphines.
+3 sons suffisent pour la bêta :
+
+5.1. Trouver ou créer 3 sons (objets Sound dans Roblox Studio) :
+   a) "clang_marteau" — un grand impact métallique, utilisé quand le joueur frappe l'enclume
+      (bons points ou pas). Ce son doit être percutant, court (~0.3s), avec réverbération.
+   b) "casse_caisse" — un craquement de bois/métal quand on ouvre une caisse.
+   c) "reussite_fusion" — un son montant, positif, utilisé après une fusion réussie.
+   d) (optionnel) "echoue_fusion" — un son descendant, satisfaisant malgré tout
+      (pas de son plat, mais un son qui accepte l'échec comme progression).
+
+5.2. Intégrer les sons :
+   a) Dans la GUI de la forge, au moment du clic de frappe : jouer clang_marteau
+      avec pitch légèrement variable pour varier le son (pas 100% identique).
+   b) Ouverture de caisse → jouer casse_caisse.
+   c) Fusion réussie → jouer reussite_fusion (avec volume qui monte pendant le suspens).
+   d) Fusion échouée → jouer echoue_fusion.
+
+5.3. Pour trouver des sons libres de droits :
+   - Explorer la bibliothèque de sons de Roblox (dans l'Explorateur, clic droit > Insert > Sound)
+     ou utiliser des sons issus de ressources libres (ex. Freesound.org avec licence CC0).
+   - Si tu utilises des fichiers locaux, explique comment les importer dans Roblox Studio
+     (dragging dans l'Explorateur ou via l'outil d'importation).
+
+Teste : ouvrir une caisse → doit entendre le craquement.
+       Aller à la forge, cliquer → doit entendre le clang.
+       La différence sonore entre réussite et échec doit être perçue.
+
+──────────────────────────────────────────
+ÉTAPE 6 — Modèles 3D de couteaux (remplacement des formes simples)
+──────────────────────────────────────────
+Contexte : aujourd'hui, les couteaux sont des formes ou MeshParts simples colorés.
+Pour la bêta, chaque tier doit avoir un modèle distinct et identifiable visuellement.
+
+6.1. Créer ou obtenir 8 modèles de couteaux (un par tier) :
+   Options :
+   a) Modèles primitifs améliorés dans Roblox Studio : chaque couteau = un assemblage de
+      Part (lame rectangulaire + poignée cylindrique), avec une couleur différente par tier.
+      Ajouter des détails (bordure, poignée) via des Part additionnels ou des MeshParts.
+   b) MeshParts importés : créer/Importer des maillages simples de couteaux (fichier .obj/.fbx)
+      et les mettre dans ServerStorage ► "ForgeKnives" ► "Models" par tier.
+   c) Utiliser des modèles gratuits de la bibliothèque Roblox (avec vérification de droits).
+
+6.2. Associer chaque modèle au tier dans KnifeData :
+   - Ajouter un champ "modelPath" ou "meshId" dans chaque entry de KnifeData.
+   - Quand un couteau est donné au joueur (ouverture de caisse ou fusion réussie),
+     instancier le bon modèle et le donner comme Tool dans Backpack/StarterGear.
+
+6.3. Le couteau comme Tool (Roblox) :
+   - Le couteau est un Tool object dans StarterGear, avec le MeshPart comme enfant.
+   - Lorsqu'un couteau est obtenu, créer le Tool approprié dans le Backpack du joueur.
+   - Lorsque 2 couteaux sont fusionnés (disparaissent), les retirer du Backpack.
+   - Le couteau du tier supérieur (résultat de fusion) est créé dans le Backpack.
+
+6.4. La Vitrine (statut social — Séroténine) :
+   - Ajouter un bouton dans la GUI "Vitrine" qui ouvre un panneau montrant les couteaux
+     exposés du joueur.
+   - Le joueur peut choisir quels couteaux (1 par tier maximum) exposer.
+   - Ces couteaux sont sauvegardés (DataStore) et visibles dans l'interface.
+   - Pour la bêta, c'est une interface locale uniquement (pas encore social hub).
+
+Teste : obtenir un couteau → il doit apparaître dans le Backpack avec le bon modèle.
+       Fusionner 2 couteaux → ils disparaissent du Backpack, le nouveau couteau apparaît.
+
+──────────────────────────────────────────
+ÉTAPE 7 — Caisse premium + économie de doublons
+──────────────────────────────────────────
+Contexte : un système économique secondaire pour acheter une meilleure caisse,
+où le joueur peut dépenser ce qu'il gagne en revendant ses doublons.
+
+7.1. Créer la monnaie "Fragments de métal" :
+   - Chaque couteau en trop (plus de 1 du même tier) peut être "re Vendu" à la forge.
+   - Prix de vente par tier : T1=5, T2=10, T3=25, T4=50, T5=100, T6=200, T7=500, T8=2000.
+   - La vente retire le couteau de l'inventaire et ajoute les fragments au compte du joueur.
+   - Les fragments sont sauvegardés (DataStore, étape 4).
+
+7.2. Caisse basique (déjà existante) :
+   - Coût : 0 fragments (gratuite) ou très peu.
+   - Contenu : distribution standard (démo actuelle).
+
+7.3. Caisse premium (nouvelle) :
+   - Coût : 500 fragments (prix ajustable).
+   - Contenu : meilleurs poids de drop (tend vers les tiers supérieurs).
+     Exemple de pondération premium :
+     T1=15, T2=15, T3=20, T4=20, T5=15, T6=10, T7=4, T8=1
+   - Affichée dans l'interface avec le coût et les poids améliorés.
+
+7.4. Interface d'achat :
+   - Dans la GUI de la forge ou dans un menu "Boutique", afficher :
+     * Solde de fragments.
+     * Bouton "Acheter caisse premium" (actif si solde ≥ 500).
+   - Au clic : déduire 500 fragments, donner 1 caisse premium au joueur
+     (ou ouvrir directement la caisse premium avec un effet visuel différent).
+
+Teste : obtenir des doublons → vendre les doublons → accumuler des fragments →
+       acheter une caisse premium → ouvrir → vérifier que les drops sont meilleurs.
+
+──────────────────────────────────────────
+ÉTAPE 8 — Le Social Hub (Endorphines — complicité)
+──────────────────────────────────────────
+Contexte : la forge devient un lieu où l'on voit les autres joueurs.
+La fusion réussie d'un autre joueur nous fait plaisir par procuration (neurones miroirs).
+
+8.1. Créer un "Hub de forge" :
+   - Une zone dans le jeu (autour de l'enclume existante) où les joueurs peuvent se trouver.
+   - Un affichage shared (SurfaceGui world-space ou un écran partagé) montrant les fusions
+     en temps réel des autres joueurs :
+     * Textuellement : "[Joueur X] vient de fusionner T3→T4 !"
+     * Visuellement : animation de particules locale lors d'une fusion réussie d'un autre joueur
+       (via RemoteEvent multicast ou BroadcastEvent).
+
+8.2. BroadcastEvent ou RemoteEvent multicast :
+   - Quand un joueur réussit une fusion (serveur), envoyer un événement à TOUS les joueurs
+     présents dans le hub (pas juste au joueur concerné).
+   - Ce broadcast contient : nom du joueur, tier avant, tier après, type (normal/critique/dorée).
+
+8.3. Émotes de réaction (optionnel pour la bêta) :
+   - Quand un joueur réussit une fusion critique ou dorée, tous les joueurs dans le hub
+     voient une animation (ex. : le joueur fait une petite animation de célébration).
+   - Utiliser des animations Roblox existantes ou des animations custom simples.
+
+8.4. Chat intégré (optionnel) :
+   - Ajouter une zone de chat simple (ChatService ou roblox Chat) pour que les joueurs
+     puissent commenter les fusions entre eux.
+
+Teste : lancer 2 instances du jeu (ou inviter un ami), les deux dans le hub,
+       l'un fait une fusion → l'autre doit voir/entendre l'événement.
+
+──────────────────────────────────────────
+ÉTAPE 9 — Titres, badges et completion du Codex (Sérotonine)
+──────────────────────────────────────────
+Contexte : le joueur doit se sentir fier de sa progression au-delà de l'inventaire.
+
+9.1. Titres débloquables (affichés dans la GUI et dans le profil Roblox si possible) :
+   - "Forgeron Novice" : 10 fusions réussies
+   - "Forgeron Confirmé" : 50 fusions réussies
+   - "Collectionneur Mythique" : posséder au moins 1 Mythique (T6)
+   - "Alchimiste Divin" : posséder au moins 1 Divin (T7)
+   - "Brassieur de Cosmiques" : posséder au moins 1 Cosmique (T8)
+   - "Maître de la Forge" : fusion critique réalisée au moins une fois
+   - "Légende Dorée" : fusion dorée réalisée au moins une fois
+
+9.2. Le Codex des Lames (version complète) :
+   - Afficher les 8 tiers dans une GUI de collection.
+   - Pour chaque tier : coche ✓ si possédé (au moins 1), ○ sinon.
+   - Montrer le nombre de chaque tier possédé.
+   - Mettre à jour en temps réel (à chaque ouverture de caisse, fusion, vente).
+   - Ajouter une barre de progression "X/8 tiers collectés".
+
+9.3. Badges Roblox (si le jeu est publié) :
+   - À connecter aux badges Roblox (BadgeService) pour les titres débloquables.
+   - Pour la bêta en local, afficher les titres uniquement dans l'interface.
+
+Teste : compléter l'inventaire de différents tiers → vérifier que le Codex se met à jour.
+       Compléter 10 fusions → vérifier que le titre "Forgeron Novice" apparaît.
+
+──────────────────────────────────────────
+ÉTAPE 10 — Tests, ajustements et équilibrage (fin de la bêta)
+──────────────────────────────────────────
+Contexte : la bêta doit être équilibrée et fun. On ajuste les paramètres
+en fonction de l'expérience vécue.
+
+10.1. Ajustements à proposer au joueur (avec justification) :
+   - Poids de drop : trop de T1 ? Trop peu de T8 ? Ajuster en fonction du temps
+     observé pour obtenir un T8.
+   - Plafond de chauffe : +40 % est-il suffisant ? Trop facile ?
+   - Niveau de Maître Forgeron : +1 % par niveau, max +20 % — impact sur le % de fusion,
+     notamment pour T7 et T8.
+   - Temps de suspens à la fusion : 1.5s est-il bon ou trop long/trop court ?
+   - Prix de vente des doublons et coût de la caisse premium : est-ce accessible ?
+
+10.2. Micro-ajustements côté expérience :
+   - L'animation de fusion est-elle satisfaisante visuellement ?
+   - Le son de clang est-il perçu comme "rewarding" ?
+   - L'échec est-il perçu comme "frustrant" ou "je vais réessayer" ?
+   - Le Codex donne-t-il envie de compléter tous les tiers ?
+
+10.3. Expliquer comment faire des tests statistiques simples :
+   - Lancer N fusions de chaque tier (ex. 100 fusions T4→T5) et compter les succès.
+   - Comparer avec le % attendu pour vérifier que la logique est correcte.
+   - Noter le nombre moyen de caisses ouvertes pour obtenir 1 T8 (durée d'experience).
+
+──────────────────────────────────────────
+APÈS LA bêta — Ce qui reste pour une version complète
+──────────────────────────────────────────
+Une fois la bêta jouable et testée, les pistes suivantes (dans l'ordre du GDD) :
+
+1. Cosmétiques Robux (apparences de forge, effets de fusion, emotes) — monétisation sans casser la chimie.
+2. Hub social complet (voir les autres fusionner en direct, trading de doublons).
+3. Fusion coop (deux joueurs fusionnent leurs 2 lames identiques).
+4. Pass de saison (tiers saisonnier limité dans le temps, ex. T9 "Saisonnier").
+5. Contenu additionnel : nouvelles raretés, nouvelles animations de fusion, nouveaux sons.
+6. Optimisation et publication : performances, compatibilité mobile, tests publics.
+
+──────────────────────────────────────────
+RÈGLES GÉNÉRALES POUR CHAQUE ÉTAPE
+──────────────────────────────────────────
+- Un message de confirmation à la fin de chaque étape : "ÉTAPE X TERMINÉE — teste ceci : …"
+- Si un code plante, afficher le message d'erreur Luau complet et je le colle pour correction.
+- On ne parle pas de cosmétiques Robux, de publication, ou de contenu optionnel
+  avant que les étapes 1–10 ne soient toutes faites et testées.
+- Chaque étape est indépendante : si je veux sauter une étape, dis-moi les dépendances
+  et ce qui sera bloqué.
